@@ -70,6 +70,7 @@ void Sensor_reading() {
 void PID_LINE_FOLLOW() {
 
   int kp = 50, kd = 500, PID_Value, P, D;
+  float error; // Declare error variable
   static float previous_error = 0.0; // Made static to persist across calls
   int base_speed = 200, left_motor_speed, right_motor_speed, turn_speed = 100;
   static char t = 's'; // Made static to remember last turn direction, initialized to 'straight'
