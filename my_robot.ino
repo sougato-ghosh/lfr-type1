@@ -20,10 +20,11 @@ int led = 13;
 const byte analogPins[5] = {A0, A1, A2, A3, A4};
 
 // Global state variables for toggle button logic
-bool lineFollowingActive = false; // Is the robot currently supposed to be line following?
-int lastButtonState = HIGH;       // Previous state of the button, initialized to HIGH (not pressed)
-unsigned long lastDebounceTime = 0; // Used for button debouncing
-unsigned long debounceDelay = 50;   // Debounce time in milliseconds
+bool lineFollowingActive = false;     // Is the robot currently supposed to be line following?
+int buttonState;                      // Current debounced state of the button
+int lastSteadyButtonState = HIGH;     // Previous raw reading of the button, for debounce timing
+unsigned long lastDebounceTime = 0;   // Used for button debouncing
+unsigned long debounceDelay = 50;     // Debounce time in milliseconds
 
 void setup() {
   //motor driver pins as output
@@ -36,34 +37,31 @@ void setup() {
   //led pin as output
   pinMode(led, OUTPUT);
   Serial.begin(9600);
+  buttonState = digitalRead(button_pin); // Initialize buttonState
+  lastSteadyButtonState = buttonState;   // Initialize with current button state
 }
 
 void loop() {
-  display_value(); // Call this regardless of mode
+  display_value();
 
-  int currentButtonReading = digitalRead(button_pin);
+  int reading = digitalRead(button_pin); // Raw reading
 
-  // Debounce logic:
-  // If the switch changed, due to noise or pressing:
-  if (currentButtonReading != lastButtonState) {
-    lastDebounceTime = millis(); // Reset the debouncing timer
+  // If the raw reading has changed, reset the debouncing timer.
+  // This tracks the time since the last *change* in raw signal.
+  if (reading != lastSteadyButtonState) {
+    lastDebounceTime = millis();
   }
 
   if ((millis() - lastDebounceTime) > debounceDelay) {
-    // Whatever the reading is at, it's been stable for longer than the debounce delay,
-    // so take it as the actual current state:
+    // The reading has been stable for longer than the debounce delay.
+    // If this stable reading is different from the current debounced buttonState,
+    // it means a confirmed change has occurred.
+    if (reading != buttonState) {
+      buttonState = reading; // Update the debounced state
 
-    // If the button state has changed since the last stable reading:
-    if (currentButtonReading != lastButtonState) { // Check against the stable lastButtonState
-      // Update lastButtonState only after a stable change
-      // This was previously: lastButtonState = currentButtonReading; which could be too soon.
-      // Let's keep the update of lastButtonState for the *actual* stable state.
-      // No, the original thought was better: update lastButtonState if currentButtonReading is different from the *last read* one.
-      // The outer lastButtonState (global) is for the *debounced* state.
-
-      // If the button was pressed (transition from HIGH to LOW based on stable reading):
-      if (currentButtonReading == LOW && lastButtonState == HIGH) { // Edge detection: HIGH to LOW
-        lineFollowingActive = !lineFollowingActive; // Toggle the active state
+      // Toggle happens only on the falling edge (press: HIGH -> LOW)
+      if (buttonState == LOW) {
+        lineFollowingActive = !lineFollowingActive; // Toggle the mode
 
         if (lineFollowingActive) {
           // Just transitioned to active: blink LEDs as a start signal
@@ -81,17 +79,15 @@ void loop() {
       }
     }
   }
-  lastButtonState = currentButtonReading; // Update lastButtonState with the current reading for the next cycle's debounce check.
 
+  lastSteadyButtonState = reading; // Save the current raw reading for the next loop iteration, to detect changes.
 
-  // Now, based on the lineFollowingActive state, run the robot or keep it stopped.
+  // Act based on the lineFollowingActive state
   if (lineFollowingActive) {
     PID_LINE_FOLLOW(); // This will be called continuously if active
-  } else {
-    // If not active, ensure motors are stopped (already done when toggled off, but good for safety)
-    // motor(0, 0); // This is mostly handled when toggling off.
-    // digitalWrite(led, LOW); // Also handled when toggling off.
   }
+  // Motors are stopped and LED turned off when lineFollowingActive becomes false.
+  // No need for an 'else' block here to actively stop them on every loop if already inactive.
 }
 
 void Sensor_reading() {
