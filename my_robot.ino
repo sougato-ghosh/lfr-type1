@@ -19,6 +19,12 @@ int led = 13;
 // bool button_pin_state; // No longer needed
 const byte analogPins[5] = {A4, A3, A2, A1, A0};
 
+// New constants and variables for turn handling
+const int TURN_DETECT_DELAY = 200;    // Milliseconds to wait after detecting a potential turn
+bool expectingTurn = false;           // True if robot is in "go straight then re-evaluate" phase
+unsigned long turnDetectStartTime = 0; // Timestamp when a potential turn was detected
+char pendingTurnDirection = 's';      // 's' = straight, 'l' = left, 'r' = right
+
 // Global state variables for toggle button logic
 bool lineFollowingActive = false;     // Is the robot currently supposed to be line following?
 int buttonState;                      // Current debounced state of the button
@@ -112,77 +118,116 @@ void PID_LINE_FOLLOW() {
   int base_speed = 240, left_motor_speed, right_motor_speed, turn_speed = 100;
   static char t = 's'; // Made static to remember last turn direction, initialized to 'straight'
 
-  // The while(1) loop is removed. This function will be called repeatedly by loop() when button is pressed.
-  Sensor_reading();
+  Sensor_reading(); // Initial sensor reading for the current cycle
 
-  // If no sensors detect the line, avg might be calculated with total = 0, leading to issues.
-  // Ensure total is not zero before calculating avg, or handle the case where total is 0.
-  // Sensor_reading() already has 'if (total) avg = sensor_position / total;'
-  // If total is 0, avg will retain its previous value. This might be problematic.
-  // Let's ensure avg is well-defined. If total is 0, perhaps error should be max or based on 't'.
+  // Handle the "expectingTurn" state first
+  if (expectingTurn) {
+    if (millis() - turnDetectStartTime >= TURN_DETECT_DELAY) {
+      // Delay has passed, re-evaluate sensors
+      Sensor_reading(); // Get fresh sensor data
 
-  if (total == 0) { // No line detected
-    digitalWrite(led, HIGH); // Turn on LED to indicate line lost
-    // Robot continues with last known turn direction 't' or a search pattern
-    if (t == 'r') {
-      motor(turn_speed, -turn_speed); // Turn right
-    } else if (t == 'l') {
-      motor(-turn_speed, turn_speed); // Turn left
+      bool forwardLineDetected = (s[1] == 1 || s[2] == 1 || s[3] == 1);
+      // bool centerSensorOnLine = (s[2] == 1); // More specific check for straight
+
+      if (forwardLineDetected) {
+        // Prioritize forward: Line detected in front (especially s[1], s[2] or s[3])
+        // Proceed with normal PID for this iteration (will effectively go straight or correct slightly)
+        // No special motor command here, let PID take over.
+      } else {
+        // No forward line detected. Check if the pending turn is still indicated by sensors.
+        if (pendingTurnDirection == 'l' && (s[4] == 1 || s[3] == 1)) { // Check s[4] or s[3] for left
+          motor(-turn_speed, turn_speed); // Execute left turn
+        } else if (pendingTurnDirection == 'r' && (s[0] == 1 || s[1] == 1)) { // Check s[0] or s[1] for right
+          motor(turn_speed, -turn_speed); // Execute right turn
+        } else {
+          // No line detected at all or side line disappeared, fall through to line lost (total == 0) logic below
+          // The 'total' will be 0 or low, so the existing line lost logic will trigger.
+        }
+      }
+      expectingTurn = false; // Reset state
+      pendingTurnDirection = 's'; // Reset pending turn
+      // After this block, normal PID or line-lost logic will take over based on new Sensor_reading()
     } else {
-      // Default behavior if 't' is 's' (straight) or undefined: maybe stop or search.
-      // For now, let's make it turn one way, e.g. right.
-      motor(turn_speed, -turn_speed);
+      // Delay has not passed, continue straight
+      motor(base_speed, base_speed); // Or a defined straight speed for this phase
+      return; // Skip PID and other logic for this iteration
     }
-    // No PID calculation if line is lost, just try to find it.
-    // previous_error should probably be reset or not updated if the line is lost.
-    // previous_error = 0; // Optional: Reset error when line is lost
-    return; // Exit PID_LINE_FOLLOW, motor commands for search are set.
   }
-  
-  // If we have a line (total > 0), proceed with PID.
-  // avg is calculated in Sensor_reading() only if total is non-zero.
-  error = set_point - avg;
-  D = kd * (error - previous_error);
-    P = error * kp;
-    PID_Value = P + D;
-    previous_error = error;
 
-    //adjusting motor speed to keep the robot in line
-    right_motor_speed = base_speed - PID_Value;  //right motor speed
-    left_motor_speed = base_speed + PID_Value;  //left motor speed
-    motor(left_motor_speed, right_motor_speed);  // Apply PID adjusted speed
-
-    // Update last turn direction 't' based on edge sensors
-    // This logic should only set 't' if the line is clearly to one side.
-    // It's also used for the "line lost" scenario.
-    if (s[0] == 1 && s[4] == 0) t = 'r'; // Line far to the right (robot needs to turn hard right)
-    else if (s[4] == 1 && s[0] == 0) t = 'l'; // Line far to the left (robot needs to turn hard left)
-    // else if (total > 0 && total < 5) t = 's'; // If some sensors see the line, but not all, assume it's somewhat straight or correcting.
-
-    // Handling for intersections (all sensors black)
-    // This 'else if (total == 5)' was inside the while(1) loop.
-    // Now, it's part of a single pass of PID_LINE_FOLLOW().
-    if (total == 5) { 
-      // All sensors see black - could be an intersection or end of line marker
-      motor(0, 0); // Stop at intersection
-      // To proceed past an intersection, more logic would be needed (e.g., go straight for a bit, then re-evaluate)
-      // For now, it just stops.
-      // We might want to set a flag or special state here.
-      // If it stops, subsequent calls to PID_LINE_FOLLOW (if button is still pressed)
-      // will re-evaluate. If it's still total == 5, it will stop again.
-      // This is different from 'while (total == 5) Sensor_reading();' which would get stuck.
-      // The original code 'else if (total == 0) t = 's';' after this block was confusing.
+  // Standard Line Lost and Intersection Logic (executed if not in `expectingTurn` delay phase, or after it completes)
+  if (total == 0) { // No line detected
+    digitalWrite(led, HIGH); // Indicate line lost
+    if (t == 'r') {
+      motor(turn_speed, -turn_speed);
+    } else if (t == 'l') {
+      motor(-turn_speed, turn_speed);
+    } else {
+      motor(turn_speed, -turn_speed); // Default search: turn right
     }
-    
-    // The LED that was turned on when total == 0 should be turned off if line is found again.
-    // Or, use LED to indicate line following is active.
-    digitalWrite(led, LOW); // Assuming LED HIGH meant line lost, turn it off if line is found/processed.
-                            // This might conflict with LED blinking in loop().
-                            // Let's reconsider LED usage. The loop() blinks then calls this.
-                            // Maybe LED in PID_LINE_FOLLOW is for error states only.
-                            // For now, if total !=0, we are "on line", turn off "line lost" indicator.
+    // previous_error = 0; // Optional: Reset error when line is lost
+    return;
+  }
 
-} // End of PID_LINE_FOLLOW function (removed while(1))
+  if (total == 5) { // All sensors see black - intersection
+    motor(0, 0); // Stop at intersection
+    // Potentially set expectingTurn = true, pendingTurnDirection = 's' (or based on rules),
+    // and turnDetectStartTime = millis() to go straight over intersection for TURN_DETECT_DELAY.
+    // For now, just stops as per original refined logic.
+    // If we want to cross, we might need more states or rules.
+    // Example: `expectingTurn = true; pendingTurnDirection = 's'; turnDetectStartTime = millis(); motor(base_speed, base_speed); return;`
+    return; // Stop and wait for next cycle or manual restart for now.
+  }
+
+  // If not expecting a turn (or finished expecting one and line is found),
+  // and not line-lost or at an intersection, then detect potential new turns or do PID.
+  if (!expectingTurn) { // This check ensures we don't re-trigger turn detection immediately after finishing one.
+    // Detect Potential Turns (if middle sensor is off the line, and an edge one is on)
+    // s[2] == 0 (middle sensor NOT on line)
+    // s[1] == 0 (inner right sensor NOT on line)
+    // s[3] == 0 (inner left sensor NOT on line)
+    if (s[0] == 1 && s[1] == 0 && s[2] == 0) { // Potential sharp right turn
+      expectingTurn = true;
+      turnDetectStartTime = millis();
+      pendingTurnDirection = 'r';
+      motor(base_speed, base_speed); // Start going straight
+      return;
+    } else if (s[4] == 1 && s[3] == 0 && s[2] == 0) { // Potential sharp left turn
+      expectingTurn = true;
+      turnDetectStartTime = millis();
+      pendingTurnDirection = 'l';
+      motor(base_speed, base_speed); // Start going straight
+      return;
+    }
+  }
+
+  // PID Calculation and Normal Line Following (if no special states/conditions above are met)
+  // This part is reached if:
+  // - not in `expectingTurn` delay
+  // - line is detected (total > 0 and total < 5)
+  // - no new sharp turn was just detected in this cycle
+
+  error = set_point - avg; // avg should be valid here because total > 0
+  P = error * kp;
+  D = kd * (error - previous_error);
+  PID_Value = P + D;
+  previous_error = error;
+
+  right_motor_speed = base_speed - PID_Value;
+  left_motor_speed = base_speed + PID_Value;
+  motor(left_motor_speed, right_motor_speed);
+
+  // Update last turn direction 't' for line loss recovery
+  // This logic might need refinement based on how well new turn logic works.
+  // For example, if s[0] and s[4] are used by new turn logic, 't' might not get set for hard turns.
+  // However, 't' is more for gradual loss or when line ends.
+  if (s[0] == 1 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0) t = 'r'; // Far right
+  else if (s[4] == 1 && s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0) t = 'l'; // Far left
+  // Consider if 't' should be 's' if robot is generally on line, e.g. total >=1 && total <=3
+  // else if (total > 0 && total < 5 ) t = 's'; // This might override 't' too eagerly.
+
+  digitalWrite(led, LOW); // If line is being followed, turn off "line lost" indicator.
+
+} // End of PID_LINE_FOLLOW function
 
 void display_value() {  //display the analog value of sensor in serial monitor
   for (byte i = 0; i < 5; i++) {
