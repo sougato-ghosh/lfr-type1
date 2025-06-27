@@ -17,7 +17,14 @@ int set_point = 3;
 int button_pin = 12;
 int led = 13;
 // bool button_pin_state; // No longer needed
-const byte analogPins[5] = {A0, A1, A2, A3, A4};
+const byte analogPins[5] = {A4, A3, A2, A1, A0};
+
+// Global state variables for toggle button logic
+bool lineFollowingActive = false;     // Is the robot currently supposed to be line following?
+int buttonState;                      // Current debounced state of the button
+int lastSteadyButtonState = HIGH;     // Previous raw reading of the button, for debounce timing
+unsigned long lastDebounceTime = 0;   // Used for button debouncing
+unsigned long debounceDelay = 50;     // Debounce time in milliseconds
 
 void setup() {
   //motor driver pins as output
@@ -30,27 +37,57 @@ void setup() {
   //led pin as output
   pinMode(led, OUTPUT);
   Serial.begin(9600);
+  buttonState = digitalRead(button_pin); // Initialize buttonState
+  lastSteadyButtonState = buttonState;   // Initialize with current button state
 }
 
 void loop() {
-  display_value(); // Display sensor values continuously
+  display_value();
 
-  // When button is pressed (goes LOW), the robot will start to follow lines.
-  if (digitalRead(button_pin) == LOW) {
-    // Blink LED 3 times to indicate start of line following mode
-    for (int i = 0; i < 3; ++i) {
-      digitalWrite(led, HIGH);
-      delay(100);
-      digitalWrite(led, LOW);
-      delay(100);
-    }
-    PID_LINE_FOLLOW();  // Call the line following logic.
-                        // This function will be modified later to not loop indefinitely.
-  } else {
-    // When button is not pressed:
-    digitalWrite(led, LOW); // Turn off LED
-    motor(0, 0);          // Stop motors
+  int reading = digitalRead(button_pin); // Raw reading
+
+  // If the raw reading has changed, reset the debouncing timer.
+  // This tracks the time since the last *change* in raw signal.
+  if (reading != lastSteadyButtonState) {
+    lastDebounceTime = millis();
   }
+
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    // The reading has been stable for longer than the debounce delay.
+    // If this stable reading is different from the current debounced buttonState,
+    // it means a confirmed change has occurred.
+    if (reading != buttonState) {
+      buttonState = reading; // Update the debounced state
+
+      // Toggle happens only on the falling edge (press: HIGH -> LOW)
+      if (buttonState == LOW) {
+        lineFollowingActive = !lineFollowingActive; // Toggle the mode
+
+        if (lineFollowingActive) {
+          // Just transitioned to active: blink LEDs as a start signal
+          for (int i = 0; i < 3; ++i) {
+            digitalWrite(led, HIGH);
+            delay(100);
+            digitalWrite(led, LOW);
+            delay(100);
+          }
+        } else {
+          // Just transitioned to inactive: ensure LED is off and motors stop
+          digitalWrite(led, LOW);
+          motor(0, 0);
+        }
+      }
+    }
+  }
+
+  lastSteadyButtonState = reading; // Save the current raw reading for the next loop iteration, to detect changes.
+
+  // Act based on the lineFollowingActive state
+  if (lineFollowingActive) {
+    PID_LINE_FOLLOW(); // This will be called continuously if active
+  }
+  // Motors are stopped and LED turned off when lineFollowingActive becomes false.
+  // No need for an 'else' block here to actively stop them on every loop if already inactive.
 }
 
 void Sensor_reading() {
@@ -101,7 +138,7 @@ void PID_LINE_FOLLOW() {
     // previous_error = 0; // Optional: Reset error when line is lost
     return; // Exit PID_LINE_FOLLOW, motor commands for search are set.
   }
-
+  
   // If we have a line (total > 0), proceed with PID.
   // avg is calculated in Sensor_reading() only if total is non-zero.
   error = set_point - avg;
@@ -118,14 +155,14 @@ void PID_LINE_FOLLOW() {
     // Update last turn direction 't' based on edge sensors
     // This logic should only set 't' if the line is clearly to one side.
     // It's also used for the "line lost" scenario.
-    if (s[0] == 1 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0) t = 'r'; // Line far to the right (robot needs to turn hard right)
-    else if (s[4] == 1 && s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0) t = 'l'; // Line far to the left (robot needs to turn hard left)
+    if (s[0] == 1 && s[4] == 0) t = 'r'; // Line far to the right (robot needs to turn hard right)
+    else if (s[4] == 1 && s[0] == 0) t = 'l'; // Line far to the left (robot needs to turn hard left)
     // else if (total > 0 && total < 5) t = 's'; // If some sensors see the line, but not all, assume it's somewhat straight or correcting.
 
     // Handling for intersections (all sensors black)
     // This 'else if (total == 5)' was inside the while(1) loop.
     // Now, it's part of a single pass of PID_LINE_FOLLOW().
-    if (total == 5) {
+    if (total == 5) { 
       // All sensors see black - could be an intersection or end of line marker
       motor(0, 0); // Stop at intersection
       // To proceed past an intersection, more logic would be needed (e.g., go straight for a bit, then re-evaluate)
@@ -136,7 +173,7 @@ void PID_LINE_FOLLOW() {
       // This is different from 'while (total == 5) Sensor_reading();' which would get stuck.
       // The original code 'else if (total == 0) t = 's';' after this block was confusing.
     }
-
+    
     // The LED that was turned on when total == 0 should be turned off if line is found again.
     // Or, use LED to indicate line following is active.
     digitalWrite(led, LOW); // Assuming LED HIGH meant line lost, turn it off if line is found/processed.
@@ -189,13 +226,13 @@ void motor(int left_speed_cmd, int right_speed_cmd) {
   if (actual_left_speed > 255) actual_left_speed = 255;
   if (actual_right_speed > 255) actual_right_speed = 255;
   // analogWrite also handles values < 0 by treating them as 0, but explicit check is clearer.
-  if (actual_left_speed < 0) actual_left_speed = 0;
+  if (actual_left_speed < 0) actual_left_speed = 0; 
   if (actual_right_speed < 0) actual_right_speed = 0;
 
 
   analogWrite(enB, actual_left_speed);  // enB for Left Motor
   analogWrite(enA, actual_right_speed); // enA for Right Motor
-
+  
   Serial.print("L:");
   Serial.print(actual_left_speed);
   Serial.print(" R:");
