@@ -106,10 +106,10 @@ void Sensor_reading() {
 
 void PID_LINE_FOLLOW() {
 
-  int kp = 50, kd = 500, PID_Value, P, D;
+  int kp = 200, kd = 300, PID_Value, P, D;
   float error; // Declare error variable
   static float previous_error = 0.0; // Made static to persist across calls
-  int base_speed = 200, left_motor_speed, right_motor_speed, turn_speed = 100;
+  int base_speed = 240, left_motor_speed, right_motor_speed, turn_speed = 100;
   static char t = 's'; // Made static to remember last turn direction, initialized to 'straight'
 
   // The while(1) loop is removed. This function will be called repeatedly by loop() when button is pressed.
